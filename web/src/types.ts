@@ -69,6 +69,20 @@ export type Server = {
   remark: string
   traffic_used: number | null
   traffic_percent: number | null
+  /** TX 补丁：CDT 接口流量（GB），None = 本轮未成功查到 */
+  cdt_gb?: number | null
+  /** TX 补丁：合并值来自哪一方：cdt / tx / max */
+  traffic_source?: string | null
+  /** TX 补丁：机器上报 TX（GB），None = 从未上报 */
+  tx_gb?: number | null
+  /** TX 补丁：TX 是否在 180 秒新鲜窗口内 */
+  tx_fresh?: boolean
+  /** TX 补丁：面板收到 TX 的时间戳（秒），0 = 从未上报 */
+  tx_received_at?: number
+  /** TX 补丁：距上次 TX 上报的秒数，None = 从未上报 */
+  tx_age_seconds?: number | null
+  /** TX 补丁：TX 所属月份 YYYY-MM */
+  tx_month?: string
   instance_status: string
   stopped_mode: string
   public_ip: string
