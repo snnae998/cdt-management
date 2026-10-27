@@ -1775,7 +1775,14 @@ def _all_stopped_any_mode(servers: list[dict[str, Any]]) -> bool:
 
 
 def _refresh(server: dict[str, Any]) -> None:
-    traffic = aliyun.get_traffic_gb(server)
+    # TX 补丁（仅改流量取值，不改换班/DDNS/故障转移/熔断逻辑）：
+    # traffic_used = max(CDT 接口流量, 180 秒内新鲜的机器 TX)。
+    # CDT 接口有延时，TX 是 vnStat 实时口径；取最高是最保守方向——任一
+    # 达到阈值都触发 _over_threshold。TX 过期/缺失时只用 CDT；两者都
+    # 没有时 traffic_used 为 None，_over_threshold 本来就返回 False，
+    # 不会误停机。CDT 查询抛错时 _refresh 本来就会向上传播，不在这里吞掉。
+    traffic_cdt = aliyun.get_traffic_gb(server)
+    traffic, traffic_source = repo.effective_traffic(traffic_cdt, int(server["id"]))
     info = aliyun.get_instance(server)
     repo.update_server_runtime(
         int(server["id"]),
@@ -1784,9 +1791,15 @@ def _refresh(server: dict[str, Any]) -> None:
         stopped_mode=info.stopped_mode,
         public_ip=info.public_ip,
         region_id=info.region_id,
+        cdt_traffic=traffic_cdt,
+        traffic_source=traffic_source,
     )
-    repo.add_sample(int(server["id"]), traffic, info.status)
+    if traffic is not None:
+        repo.add_sample(int(server["id"]), traffic, info.status)
     server["traffic_used"] = traffic
+    # 供 server_summary 附加展示用，不影响原有字段语义。
+    server["traffic_source"] = traffic_source
+    server["cdt_traffic_gb"] = traffic_cdt
     server["instance_status"] = info.status
     server["stopped_mode"] = info.stopped_mode
     server["public_ip"] = info.public_ip

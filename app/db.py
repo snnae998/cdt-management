@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS servers (
     threshold_gb        REAL    NOT NULL DEFAULT 188,
     remark              TEXT    NOT NULL DEFAULT '',
     traffic_used        REAL,
+    -- TX 补丁：traffic_used 是 max(CDT, 新鲜 TX) 的合并值；cdt_traffic_gb
+    -- 单独存 CDT 接口值，界面才能把 CDT / TX / 合并值三项分开展示。
+    -- traffic_source 说明合并值来自哪一方：cdt / tx / max。
+    cdt_traffic_gb      REAL,
+    traffic_source      TEXT    NOT NULL DEFAULT '',
     instance_status     TEXT    NOT NULL DEFAULT '',
     stopped_mode        TEXT    NOT NULL DEFAULT '',
     public_ip           TEXT    NOT NULL DEFAULT '',
@@ -178,6 +183,24 @@ CREATE TABLE IF NOT EXISTS traffic_samples (
     status     TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_samples_server_ts ON traffic_samples(server_id, ts DESC);
+
+-- 机器上报 TX（vnStat 口径）：面板用它和 CDT 接口流量取最高值做阈值判断。
+-- received_at 是面板收到时的时间（面板时间），不是机器自带的时间戳，
+-- 避免机器时钟偏差导致过期数据被当成新鲜数据。一个月内一台机器只保留
+-- 最新一条（按 month 分行，跨月后旧月行不再参与新鲜判断）。
+CREATE TABLE IF NOT EXISTS tx_reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id   INTEGER NOT NULL,
+    instance_id TEXT    NOT NULL DEFAULT '',
+    month       TEXT    NOT NULL DEFAULT '',
+    tx_gb       REAL    NOT NULL DEFAULT 0,
+    hostname    TEXT    NOT NULL DEFAULT '',
+    interface   TEXT    NOT NULL DEFAULT '',
+    received_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(server_id, month)
+);
+CREATE INDEX IF NOT EXISTS idx_tx_reports_instance ON tx_reports(instance_id);
+CREATE INDEX IF NOT EXISTS idx_tx_reports_server_received ON tx_reports(server_id, received_at DESC);
 """
 
 DEFAULTS: dict[str, str] = {
@@ -230,6 +253,10 @@ DEFAULTS: dict[str, str] = {
     "notify_mail_username": "",
     "notify_mail_password": "",
     "notify_mail_to": "",
+    # 机器 TX 上报：Bearer Token。空表示未启用上报接口（上报请求一律 503）。
+    # 存入 settings 表时经 repo.SENSITIVE_SETTINGS 走 AES-GCM 加密（master.key），
+    # 不以明文落盘；另可用环境变量 CDT_TX_REPORT_TOKEN 覆盖（见 repo.tx_report_token）。
+    "tx_report_token": "",
     # Webhook
     "notify_wh_enabled": "0",
     "notify_wh_url": "",
@@ -262,6 +289,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     additions = {
         "servers": {
             "site": "TEXT NOT NULL DEFAULT 'china'",
+            "cdt_traffic_gb": "REAL",
+            "traffic_source": "TEXT NOT NULL DEFAULT ''",
             "monthly_cost": "REAL",
             "balance_amount": "REAL",
             "billing_currency": "TEXT NOT NULL DEFAULT ''",

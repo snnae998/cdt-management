@@ -15,6 +15,8 @@ SENSITIVE_SETTINGS = {
     "notify_tg_token",
     "notify_mail_password",
     "notify_wh_headers",
+    # 机器 TX 上报 Bearer Token：经 security.encrypt() AES-GCM 加密后存 settings 表。
+    "tx_report_token",
 }
 
 
@@ -149,7 +151,7 @@ def is_session_revoked(token_id: str) -> bool:
 
 SERVER_COLUMNS = (
     "id, label, access_key_id, access_key_secret, region_id, site, instance_id, "
-    "quota_gb, threshold_gb, remark, traffic_used, instance_status, stopped_mode, "
+    "quota_gb, threshold_gb, remark, traffic_used, cdt_traffic_gb, traffic_source, instance_status, stopped_mode, "
     "public_ip, traffic_checked_at, status_checked_at, monthly_cost, balance_amount, "
     "billing_currency, billing_cycle, billing_updated_at, billing_error, created_at, sort_order"
 )
@@ -309,6 +311,7 @@ def delete_server(server_id: int) -> None:
     db.execute("DELETE FROM servers WHERE id=?", (server_id,))
     db.execute("DELETE FROM keepalives WHERE server_id=?", (server_id,))
     db.execute("DELETE FROM traffic_samples WHERE server_id=?", (server_id,))
+    db.execute("DELETE FROM tx_reports WHERE server_id=?", (server_id,))
     # 目标没了，DNS 绑定必须一并松掉，否则记录还挂在已经不存在的机器上
     db.execute(
         "UPDATE dns_records SET target_kind='', target_id=0, last_ip='', "
@@ -368,12 +371,24 @@ def update_server_runtime(
     stopped_mode: str | None = None,
     public_ip: str | None = None,
     region_id: str | None = None,
+    cdt_traffic: float | None = None,
+    traffic_source: str | None = None,
 ) -> None:
     now = int(time.time())
     if traffic is not None:
         db.execute(
             "UPDATE servers SET traffic_used=?, traffic_checked_at=? WHERE id=?",
             (traffic, now, server_id),
+        )
+    if cdt_traffic is not None:
+        db.execute(
+            "UPDATE servers SET cdt_traffic_gb=? WHERE id=?",
+            (cdt_traffic, server_id),
+        )
+    if traffic_source is not None:
+        db.execute(
+            "UPDATE servers SET traffic_source=? WHERE id=?",
+            (traffic_source, server_id),
         )
     if status is not None:
         if public_ip:
@@ -435,6 +450,160 @@ def latest_samples(server_id: int) -> dict[str, Any] | None:
         (server_id,),
     )
     return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------
+# 机器 TX 上报（vnStat 口径）
+# --------------------------------------------------------------------------
+# 新鲜窗口：与用户 Telegram Bot 一致，180 秒。超过即视为过期，不参与取最高，
+# 避免机器断报后旧数值一直顶着阈值、或跨月旧数值被当成本月流量。
+TX_FRESH_SECONDS = 180
+
+# 面板默认时区（与面板 timezone 设置的默认值一致）。月份判断用它把面板时间
+# 换算成 YYYY-MM；若用户把面板时区改成别的，边界处最坏情况是 TX 在跨月
+# 前后数小时内被当成过期、回落到 CDT——保守方向，不会误触发停机。
+_TX_TZ = "Asia/Shanghai"
+
+
+def tx_report_token() -> str:
+    """TX 上报 Bearer Token。
+
+    优先级：环境变量 CDT_TX_REPORT_TOKEN（部署时 -e 传入，重启即换）>
+    settings 表 tx_report_token（经 AES-GCM 加密存储）。
+    任一为空时调用方应拒绝上报请求，而不是退回无鉴权。
+    """
+    import os
+
+    env_token = os.environ.get("CDT_TX_REPORT_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    return (get_setting("tx_report_token") or "").strip()
+
+
+def _month_of(ts: int) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(_TX_TZ)
+    except Exception:
+        tz = None
+    return datetime.fromtimestamp(int(ts), tz=tz).strftime("%Y-%m")
+
+
+def record_tx_report(
+    *,
+    server_id: int,
+    instance_id: str,
+    month: str,
+    tx_gb: float,
+    hostname: str = "",
+    interface: str = "",
+    received_at: int | None = None,
+) -> dict[str, Any]:
+    """写入一条 TX 上报（调用方已做格式校验）。按 (server_id, month) 去重，
+    同月重复上报只覆盖最新值，不产生多行。返回写入的行（不含任何 Token）。"""
+    now = int(received_at if received_at is not None else time.time())
+    db.execute(
+        "INSERT INTO tx_reports(server_id, instance_id, month, tx_gb, hostname, "
+        "interface, received_at) VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(server_id, month) DO UPDATE SET instance_id=excluded.instance_id, "
+        "tx_gb=excluded.tx_gb, hostname=excluded.hostname, interface=excluded.interface, "
+        "received_at=excluded.received_at",
+        (
+            int(server_id),
+            str(instance_id or ""),
+            str(month or ""),
+            float(tx_gb),
+            str(hostname or ""),
+            str(interface or ""),
+            now,
+        ),
+    )
+    row = db.query_one(
+        "SELECT * FROM tx_reports WHERE server_id=? ORDER BY received_at DESC LIMIT 1",
+        (int(server_id),),
+    )
+    return dict(row) if row else {}
+
+
+def latest_tx_report(server_id: int) -> dict[str, Any] | None:
+    row = db.query_one(
+        "SELECT * FROM tx_reports WHERE server_id=? ORDER BY received_at DESC LIMIT 1",
+        (int(server_id),),
+    )
+    return dict(row) if row else None
+
+
+def fresh_tx_gb(server_id: int, now_ts: int | None = None) -> float | None:
+    """新鲜 TX（GB），不新鲜 / 无数据返回 None。
+
+    新鲜 = 最新一条的 received_at 在 180 秒内，且其 month 等于面板当前月份。
+    month 校验防跨月：旧月最后一分钟上报的高值不能在新月 00:00 后继续顶阈值。
+    """
+    now = int(now_ts if now_ts is not None else time.time())
+    row = latest_tx_report(server_id)
+    if row is None:
+        return None
+    try:
+        received = int(row["received_at"] or 0)
+        value = float(row["tx_gb"])
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    if now - received > TX_FRESH_SECONDS or received > now:
+        # received > now：面板时间早于收到时间（时钟回拨/异常），同样不信任。
+        return None
+    if str(row.get("month") or "") != _month_of(now):
+        return None
+    return value
+
+
+def effective_traffic(
+    cdt_gb: float | None, server_id: int, now_ts: int | None = None
+) -> tuple[float | None, str | None]:
+    """阈值判断用的流量 = max(CDT 接口流量, 新鲜 TX)。
+
+    返回 (used, source)：source 为 "cdt" / "tx" / "max"（TX 为最高时）/ None。
+    任一为 None 时只看另一方；两者都 None 时返回 (None, None)，
+    调用方 _over_threshold 对 None 本来就返回 False，不会误停机。
+    """
+    tx = fresh_tx_gb(server_id, now_ts)
+    cdt = None if cdt_gb is None else float(cdt_gb)
+    if cdt is not None and cdt < 0:
+        cdt = None
+    if tx is None:
+        return (cdt, "cdt" if cdt is not None else None)
+    if cdt is None:
+        return (tx, "tx")
+    if tx > cdt:
+        return (tx, "max")
+    return (cdt, "cdt")
+
+
+def tx_summary(server_id: int, now_ts: int | None = None) -> dict[str, Any]:
+    """供 server_summary 附加展示：不改变原有字段，只追加 tx_* 字段。"""
+    row = latest_tx_report(server_id)
+    now = int(now_ts if now_ts is not None else time.time())
+    if row is None:
+        return {
+            "tx_gb": None,
+            "tx_fresh": False,
+            "tx_received_at": 0,
+            "tx_month": "",
+            "tx_age_seconds": None,
+        }
+    fresh = fresh_tx_gb(server_id, now) is not None
+    received = int(row["received_at"] or 0)
+    return {
+        "tx_gb": float(row["tx_gb"]) if row["tx_gb"] is not None else None,
+        "tx_fresh": fresh,
+        "tx_received_at": received,
+        "tx_month": str(row.get("month") or ""),
+        # 前端直接展示「几分钟前上报」用；None = 从未上报。
+        "tx_age_seconds": (now - received) if received else None,
+    }
 
 
 # --------------------------------------------------------------------------

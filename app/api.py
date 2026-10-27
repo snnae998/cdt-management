@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import ipaddress
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -85,6 +87,7 @@ SETTING_LABELS = {
     "notify_wh_method": "Webhook 方法",
     "notify_wh_body": "Webhook 请求体",
     "notify_wh_headers": "Webhook 请求头",
+    "tx_report_token": "TX 上报 Token",
     "admin_username": "用户名",
     "admin_password": "登录密码",
 }
@@ -387,6 +390,18 @@ def server_summary(
     used = server.get("traffic_used")
     quota = float(server.get("quota_gb") or 0) or 1
     owner = (managed or {}).get(int(server.get("id") or 0))
+    # TX 附加展示（只追加字段，不改原有字段语义；旧前端忽略多余字段）。
+    # traffic_source 只有 _refresh 跑过后才有，手动刷新/列表时用 tx_summary 补新鲜度。
+    try:
+        tx_info = repo.tx_summary(int(server.get("id") or 0))
+    except Exception:  # noqa: BLE001
+        tx_info = {
+            "tx_gb": None,
+            "tx_fresh": False,
+            "tx_received_at": 0,
+            "tx_month": "",
+            "tx_age_seconds": None,
+        }
     return {
         "id": server.get("id"),
         "label": server.get("label") or "",
@@ -399,6 +414,16 @@ def server_summary(
         "remark": server.get("remark") or "",
         "traffic_used": used,
         "traffic_percent": round((used or 0) / quota * 100, 2) if used is not None else None,
+        # 三项分开展示：CDT（阿里云接口）、TX（机器上报）、traffic_used（合并值）。
+        # traffic_used = max(CDT, 新鲜 TX)；traffic_source 说明它来自哪一方。
+        # cdt_gb 为 None 表示本轮尚未成功查到 CDT；tx_gb 为 None 表示从未上报。
+        "cdt_gb": server.get("cdt_traffic_gb"),
+        "traffic_source": server.get("traffic_source") or None,
+        "tx_gb": tx_info.get("tx_gb"),
+        "tx_fresh": tx_info.get("tx_fresh", False),
+        "tx_received_at": tx_info.get("tx_received_at", 0),
+        "tx_age_seconds": tx_info.get("tx_age_seconds"),
+        "tx_month": tx_info.get("tx_month", ""),
         "instance_status": server.get("instance_status") or "Unknown",
         "stopped_mode": server.get("stopped_mode") or "",
         "public_ip": server.get("public_ip") or "",
@@ -491,6 +516,60 @@ def register(app: FastAPI) -> None:
     @app.get("/api/health")
     def health():  # noqa: ANN202
         return {"status": "ok", "version": settings.VERSION}
+
+    # -- 机器 TX 上报 ---------------------------------------------------
+    # 不走管理员会话/CSRF：机器没有浏览器会话，凭 Bearer Token 鉴权。
+    # Token 来自 repo.tx_report_token()：环境变量 CDT_TX_REPORT_TOKEN 优先，
+    # 否则 settings 表 tx_report_token（AES-GCM 加密存储）。未配置时一律 503，
+    # 不退回无鉴权。收到时间一律取面板时间，不信任机器自带 timestamp，
+    # 避免机器时钟偏差让过期数据被当成新鲜数据。
+    @app.post("/api/v1/tx-report")
+    def tx_report(request: Request, payload: dict[str, Any]):  # noqa: ANN202
+        expected = repo.tx_report_token()
+        if not expected:
+            raise HTTPException(status_code=503, detail="TX 上报未启用：请先设置上报 Token")
+        auth = (request.headers.get("authorization") or "").strip()
+        provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not provided or not hmac.compare_digest(provided, expected):
+            raise HTTPException(status_code=401, detail="TX 上报 Token 无效")
+        if not isinstance(payload, dict):
+            raise ValueError("TX 上报体必须是 JSON 对象")
+        instance_id = str(payload.get("instance_id") or "").strip()
+        if not instance_id:
+            raise ValueError("instance_id 不能为空")
+        tx_gb = payload.get("tx_gb")
+        if isinstance(tx_gb, bool) or not isinstance(tx_gb, (int, float)):
+            raise ValueError("tx_gb 必须是数字")
+        tx_value = float(tx_gb)
+        if tx_value < 0 or tx_value != tx_value or tx_value in (float("inf"), float("-inf")):
+            raise ValueError("tx_gb 必须是不小于 0 的有限数字")
+        month = str(payload.get("month") or "").strip()
+        if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+            raise ValueError("month 必须是 YYYY-MM 格式")
+        # instance_id 必须映射到已存在的面板服务器；未知实例不建服务器、不写数据。
+        row = repo.db.query_one(
+            "SELECT id FROM servers WHERE instance_id=?", (instance_id,)
+        )
+        if row is None:
+            # 日志里只留打码后的 instance_id，不把完整实例 ID 甩进日志。
+            log.warning("tx-report rejected: unknown instance_id %s", security.mask(instance_id))
+            raise HTTPException(status_code=404, detail="未知实例：该 instance_id 未在面板登记")
+        server_id = int(row["id"])
+        saved = repo.record_tx_report(
+            server_id=server_id,
+            instance_id=instance_id,
+            month=month,
+            tx_gb=tx_value,
+            hostname=str(payload.get("hostname") or ""),
+            interface=str(payload.get("interface") or ""),
+        )
+        return {
+            "ok": True,
+            "server_id": server_id,
+            "month": month,
+            "tx_gb": tx_value,
+            "received_at": int(saved.get("received_at") or 0),
+        }
 
     @app.get("/api/v1/system/init-status")
     def init_status():  # noqa: ANN202
@@ -861,6 +940,8 @@ def register(app: FastAPI) -> None:
                 "body": config.get("notify_wh_body") or "",
             },
             "channels": notify.enabled_channels(config),
+            # 只暴露「是否已配置」，绝不回显 Token 本身。
+            "tx_report_token_configured": bool(repo.tx_report_token()),
             "sdk_ready": aliyun.sdk_ready(),
             "dry_run": settings.DRY_RUN,
             "repo": settings.REPO,
@@ -972,6 +1053,16 @@ def register(app: FastAPI) -> None:
             put_str("notify_wh_body", wh.get("body"))
             if wh.get("headers"):
                 updates["notify_wh_headers"] = str(wh["headers"])
+
+        # TX 上报 Token：跟 DDNS/Telegram Token 同款处理——只在非空时更新，
+        # 空表示「不改」，不允许用空值把已配置的 Token 悄悄清掉。
+        # 旧前端不发这个字段时什么都不变；管理员可用设置接口提交
+        # {"tx_report": {"token": "<new-token>"}} 来设置/轮换。
+        tx_payload = payload.get("tx_report") or {}
+        if isinstance(tx_payload, dict) and tx_payload.get("token"):
+            updates["tx_report_token"] = str(tx_payload["token"])
+        elif payload.get("tx_report_token"):
+            updates["tx_report_token"] = str(payload["tx_report_token"])
 
         bumped_epoch: int | None = None
         new_session_user: str | None = None
