@@ -46,6 +46,30 @@ function dnsRecords(value?: string): string[] {
     .filter(Boolean)
 }
 
+/** TX 补丁：TX 新鲜度文案。未上报、过期、新鲜三种状态必须一眼分清，
+    否则用户会把过期 TX 当成实时流量去判断阈值。 */
+function txAgeText(server: Server): string {
+  if (!server.tx_received_at || server.tx_age_seconds === null || server.tx_age_seconds === undefined) {
+    return '未上报'
+  }
+  const age = server.tx_age_seconds
+  const ago = age < 60 ? `${age}秒前` : age < 3600 ? `${Math.floor(age / 60)}分钟前` : `${Math.floor(age / 3600)}小时前`
+  return server.tx_fresh ? `新鲜 · ${ago}` : `过期 · ${ago}`
+}
+
+/** TX 补丁：CDT / TX / 合并值三项分开展示。合并值 = max(CDT, 新鲜 TX)，
+    只看合并值会分不清到底是哪一方顶到了阈值。 */
+function TrafficBreakdown({ server }: { server: Server }) {
+  const cdt = server.cdt_gb === null || server.cdt_gb === undefined ? '—' : server.cdt_gb.toFixed(1)
+  const tx = server.tx_gb === null || server.tx_gb === undefined ? '—' : server.tx_gb.toFixed(1)
+  const used = server.traffic_used === null || server.traffic_used === undefined ? '—' : server.traffic_used.toFixed(1)
+  return (
+    <div style={{ fontSize: 11.5, color: 'var(--muted-soft)' }} title={`合并值来源：${server.traffic_source || '—'}`}>
+      CDT {cdt} GB · TX {tx} GB（{txAgeText(server)}）· 合计取最高 {used} GB
+    </div>
+  )
+}
+
 export default function ServersView({
   servers,
   busyId,
@@ -241,6 +265,7 @@ export default function ServersView({
                   quota={server.quota_gb}
                   threshold={server.threshold_gb}
                 />
+                <TrafficBreakdown server={server} />
 
                 <CostRow
                   billing={server.billing}
@@ -404,6 +429,7 @@ function ServerTable({
                       <AlertTriangle size={11} style={{ color: 'var(--red)' }} />
                     )}
                   </div>
+                  <TrafficBreakdown server={server} />
                 </td>
                 <td className="server-table-cost" data-label="费用">
                   <CostRow
