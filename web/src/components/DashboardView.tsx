@@ -20,7 +20,9 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import type { EventItem, Overview } from '../types'
+import { maskIp } from '../masking'
 import { Badge, Meter, Ring, phaseTone, statusLabel, statusTone } from './ui'
+import MaskedField from './MaskedField'
 
 const EVENT_ICON: Record<string, typeof Info> = {
   shift_done: Zap,
@@ -239,7 +241,7 @@ export default function DashboardView({
                         <Badge tone={statusTone(duty.server.instance_status)}>
                           {statusLabel(duty.server.instance_status, duty.server.stopped_mode)}
                         </Badge>
-                        <code>{duty.server.public_ip || '—'}</code>
+                        <code><MaskedField full={duty.server.public_ip} masked={maskIp(duty.server.public_ip)} fallback="—" /></code>
                       </div>
                       <Meter
                         used={duty.server.traffic_used}
