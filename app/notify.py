@@ -232,7 +232,7 @@ def _json_inner(value: str) -> str:
 
     以前是直接 str.replace 塞进用户模板：换班组名 / 服务器备注都是自由输入，
     含一个双引号（如 `香港"主力"`）就会产出 `{"content":"香港"主力"..."}`
-    这种非法 JSON，对方回 400，通知静默失败。json.dumps 顺带把换行转成 \n，
+    这种非法 JSON，对方回 400，通知静默失败。json.dumps 顺带把换行转成 \\n，
     正好也是嵌进 JSON 字符串该有的样子。
     """
     return json.dumps(str(value), ensure_ascii=False)[1:-1]
