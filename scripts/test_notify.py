@@ -72,7 +72,7 @@ class WebhookTpl(unittest.TestCase):
             self._config('{"title":"{title}","content":"{text}"}'), "webhook", message
         )
 
-        # 解析得动 = 转义做对了；以前这里会因为 "主力" 把字符串提前闭合而抛 JSONDecodeError
+        # 解析得动 = 转义做对了；以前这里会因为 `"主力"` 把字符串提前闭合而抛 JSONDecodeError
         payload = json.loads(self.sent["data"].decode("utf-8"))
         self.assertEqual(payload["title"], '香港"主力"：换班完成')
         self.assertEqual(payload["content"], "第一行\n第二行")
