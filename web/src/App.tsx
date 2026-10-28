@@ -26,6 +26,8 @@ import SettingsDrawer from './components/SettingsDrawer'
 import ConfirmDialog from './components/ConfirmDialog'
 import DNSView from './components/DNSView'
 import { Badge, Empty, Modal, statusLabel, statusTone } from './components/ui'
+import { maskInstanceId, maskIp } from './masking'
+import MaskedField from './components/MaskedField'
 
 type Phase = 'loading' | 'setup' | 'login' | 'ready' | 'fatal'
 type View = 'dashboard' | 'keepalive' | 'shift' | 'servers' | 'dns'
@@ -745,8 +747,8 @@ export default function App() {
                   </div>
                   <div className="slot-name">{server.label}</div>
                   <div className="slot-line">
-                    <code>{server.instance_id || '未填实例'}</code>
-                    <span>{server.public_ip || '无公网 IP'}</span>
+                    <code><MaskedField full={server.instance_id} masked={maskInstanceId(server.instance_id)} fallback="未填实例" /></code>
+                    <span><MaskedField full={server.public_ip} masked={maskIp(server.public_ip)} fallback="无公网 IP" /></span>
                   </div>
                 </button>
               ))}
