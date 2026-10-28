@@ -5,7 +5,7 @@
 .app-shell {
   display: grid;
   grid-template-columns: 244px minmax(0, 1fr);
-  /* 100dvh 是「地址栏收起后」的真实可视高度；iOS Safari 上 100vh 会比可视区高，
+  /* 100dvh 是「地址栏收起后」的真实可视高度；iOS Safari 上 100vh 比可视区高，
      整页会多出一截滚动。不认识 dvh 的浏览器自动忽略第二行，用回 100vh。 */
   min-height: 100vh;
   min-height: 100dvh;
