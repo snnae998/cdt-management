@@ -18,9 +18,11 @@ import {
   Trash2,
 } from 'lucide-react'
 import { regionLabel } from '../regions'
+import { maskInstanceId, maskIp } from '../masking'
 import { ownerBase, ownerLabel } from '../owners'
 import type { Billing, Server } from '../types'
 import { Badge, Empty, Meter, statusLabel, statusTone, stoppedModeLabel } from './ui'
+import MaskedField from './MaskedField'
 
 type Props = {
   servers: Server[]
@@ -245,7 +247,7 @@ export default function ServersView({
                 </div>
 
                 <div className="meta-line">
-                  <code style={{ fontSize: 11 }}>{server.instance_id || '未填实例 ID'}</code>
+                  <code style={{ fontSize: 11 }}><MaskedField full={server.instance_id} masked={maskInstanceId(server.instance_id)} fallback="未填实例 ID" /></code>
                 </div>
                 <div className="meta-line">
                   <span className="card-region" title={server.region_id}>
@@ -256,7 +258,7 @@ export default function ServersView({
                     {server.site === 'international' ? '国际站' : '中国站'}
                   </span>
                   <span className="card-ip" title="公网 IP">
-                    {server.public_ip || '无公网 IP'}
+                    <MaskedField full={server.public_ip} masked={maskIp(server.public_ip)} fallback="无公网 IP" />
                   </span>
                 </div>
 
@@ -396,8 +398,8 @@ function ServerTable({
                   <div className="server-table-title" title={server.label}>
                     {server.label}
                   </div>
-                  <code className="server-table-sub" title={server.instance_id}>
-                    {server.instance_id || '未填实例 ID'}
+                  <code className="server-table-sub" title={maskInstanceId(server.instance_id)}>
+                    <MaskedField full={server.instance_id} masked={maskInstanceId(server.instance_id)} fallback="未填实例 ID" />
                   </code>
                 </td>
                 <td data-label="状态">
@@ -417,7 +419,7 @@ function ServerTable({
                   </div>
                 </td>
                 <td data-label="公网 IP">
-                  <span className="server-table-mono">{server.public_ip || '—'}</span>
+                  <span className="server-table-mono"><MaskedField full={server.public_ip} masked={maskIp(server.public_ip)} fallback="—" /></span>
                 </td>
                 <td data-label="流量 / 配额">
                   <div className="server-table-meter">
