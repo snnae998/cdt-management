@@ -311,6 +311,16 @@ def delete_server(server_id: int) -> None:
     db.execute("DELETE FROM servers WHERE id=?", (server_id,))
     db.execute("DELETE FROM keepalives WHERE server_id=?", (server_id,))
     db.execute("DELETE FROM traffic_samples WHERE server_id=?", (server_id,))
+    # 这台机器专属的一次性标记一并清掉。SQLite 的 AUTOINCREMENT 不复用 id，
+    # 留着不会被新机器撞上，但也没人再去清 —— 只能等 90 天的兜底清理，白占表。
+    db.execute(
+        "DELETE FROM flags WHERE key IN (?,?,?)",
+        (
+            f"keepalive_wait:{server_id}",
+            f"keepalive_err:{server_id}",
+            f"keepalive_fail:{server_id}",
+        ),
+    )
     db.execute("DELETE FROM tx_reports WHERE server_id=?", (server_id,))
     # 目标没了，DNS 绑定必须一并松掉，否则记录还挂在已经不存在的机器上
     db.execute(
@@ -966,20 +976,28 @@ _HEALTHY_PHASES = ("pending", "switching", "settled", "failover", "manual")
 
 def upsert_run(group_id: int, slot: str, **fields: Any) -> dict[str, Any]:
     now = int(time.time())
-    existing = get_run(group_id, slot)
-    if existing is None:
-        db.execute(
-            "INSERT INTO shift_runs(group_id, slot, started_at, updated_at) VALUES(?,?,?,?)",
-            (group_id, slot, now, now),
-        )
     if str(fields.get("phase") or "") in _HEALTHY_PHASES and "note" not in fields:
         fields["note"] = ""
-    if fields:
-        assignments = ", ".join(f"{key}=?" for key in fields)
-        db.execute(
-            f"UPDATE shift_runs SET {assignments}, updated_at=? WHERE group_id=? AND slot=?",
-            (*fields.values(), now, group_id, slot),
-        )
+    # started_at 是本班次「从什么时候开始处理」的锚点（换班超时按它算）。
+    # 默认只在建行时写一次；抢占恢复那一处会显式传值，表示重新计时。
+    reset_started = "started_at" in fields
+    started_at = int(fields.pop("started_at")) if reset_started else now
+
+    columns = ["group_id", "slot", "started_at", "updated_at", *fields.keys()]
+    values: list[Any] = [group_id, slot, started_at, now, *fields.values()]
+    # 以前是「先 INSERT 再 UPDATE」两条语句，中间崩掉会留一条只有 group_id/slot
+    # 的空 run。合成一条原子 upsert：冲突时只覆盖本次带的字段 + updated_at，
+    # 不动 started_at（每次对账都刷它，换班超时就永远等不到了）。
+    update_keys = [*fields.keys(), "updated_at"]
+    if reset_started:
+        update_keys.insert(0, "started_at")
+    updates = ", ".join(f"{key}=excluded.{key}" for key in update_keys)
+    db.execute(
+        f"INSERT INTO shift_runs({', '.join(columns)}) "
+        f"VALUES({', '.join('?' * len(columns))}) "
+        f"ON CONFLICT(group_id, slot) DO UPDATE SET {updates}",
+        values,
+    )
     return get_run(group_id, slot) or {}
 
 
@@ -1169,6 +1187,23 @@ def list_events(
     for event in events:
         event["progress"] = _parse_progress(event.get("progress"))
     return events
+
+
+def latest_event_id(kind: str, group_id: int = 0, max_age: int = 3600) -> int:
+    """最近一条某类事件的 ID，用来给「已经记过的事件」补一条收尾进度。
+
+    超限停机是两轮完成的：先记「已强制节省停机」，等实例真停稳了下一轮才发报告。
+    报告那一步要追加到前一轮那条事件上，这里按类型 + 换班组取最近一条；
+    加个时间窗，免得停用很久之后重新超限时写到一条陈年事件上。
+    """
+    sql = "SELECT id FROM events WHERE kind=? AND ts>=?"
+    params: list[Any] = [kind, int(time.time()) - max_age]
+    if group_id:
+        sql += " AND group_id=?"
+        params.append(group_id)
+    sql += " ORDER BY id DESC LIMIT 1"
+    row = db.query_one(sql, params)
+    return int(row["id"]) if row else 0
 
 
 def _parse_progress(raw: str) -> list[dict[str, Any]]:
