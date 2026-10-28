@@ -132,12 +132,11 @@ def duty_at(group: dict[str, Any], now_ts: float) -> tuple[dict[str, Any], int] 
     if _is_timetable_group(group):
         return _duty_at_timetable(group, now_ts)
 
-    # 「当前谁当班」必须走 actual_duty：本班次可能已经故障转移过、
-        # 也被手动切过，那时 run.duty_server_id 才是真相。以前这里按偏移量
-        # 从时钟推当前成员，一旦发生过转移，「下一台」算出来的正是那个已经被
-        # 覆盖上去的当班机 —— 用户点「立即换班」看着按钮转了一圈，机器没变。
-        picked_now = actual_duty(group, now_ts)
-        current_member = picked_now[0] if picked_now else members[0]
+    total = sum(float(m["hours"]) for m in members) * 3600
+    anchor = float(group.get("anchor_at") or group.get("created_at") or now_ts)
+    elapsed = max(0.0, now_ts - anchor)
+    cycle_index = int(elapsed // total)
+    offset = elapsed - cycle_index * total
 
     accumulated = 0.0
     for member in members:
@@ -234,6 +233,7 @@ def next_switch_at(group: dict[str, Any], now_ts: float) -> float | None:
 
     if _is_timetable_group(group):
         return _next_switch_timetable(group, now_ts)
+
     total = sum(float(m["hours"]) for m in members) * 3600
     anchor = float(group.get("anchor_at") or group.get("created_at") or now_ts)
     elapsed = max(0.0, now_ts - anchor)
