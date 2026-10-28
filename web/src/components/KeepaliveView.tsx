@@ -10,8 +10,10 @@ import {
   Trash2,
 } from 'lucide-react'
 import { regionLabel } from '../regions'
+import { maskInstanceId, maskIp } from '../masking'
 import type { Keepalive, Server } from '../types'
 import { Badge, Empty, Meter, statusLabel, statusTone } from './ui'
+import MaskedField from './MaskedField'
 
 type Props = {
   keepalives: Keepalive[]
@@ -111,7 +113,7 @@ export default function KeepaliveView({
                 </div>
 
                 <div className="meta-line">
-                  <code>{item.instance_id || '未填实例 ID'}</code>
+                  <code><MaskedField full={item.instance_id} masked={maskInstanceId(item.instance_id)} fallback="未填实例 ID" /></code>
                   <span className="card-region" title={item.region_id}>
                     <MapPin size={11} />
                     {regionLabel(item.region_id)}
@@ -122,7 +124,7 @@ export default function KeepaliveView({
                 </div>
                 <div className="meta-line">
                   <span style={{ fontFamily: 'ui-monospace, Consolas, monospace' }}>
-                    {item.public_ip || '无公网 IP'}
+                    <MaskedField full={item.public_ip} masked={maskIp(item.public_ip)} fallback="无公网 IP" />
                   </span>
                 </div>
 
