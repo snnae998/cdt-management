@@ -11,8 +11,8 @@ export class APIError extends Error {
 /** 普通请求的超时。后端在本机/内网，20 秒已经非常宽松 */
 const DEFAULT_TIMEOUT_MS = 20_000
 /**
- * 慢接口的超时：新建换班组要等引擎锁最多 30 秒）再走完一轮下发；
- * 手动换班、全量 DNS 同步、费用查询要连打好几次阿里云 / Cloudflare。
+ * 慢接口的超时：新建换班组要等引擎锁（最多 30 秒）再走完一轮下发；
+ * 手动换班、全量 DNS 同步、费用查询都要连打好几次阿里云 / Cloudflare。
  */
 export const SLOW_TIMEOUT_MS = 90_000
 
@@ -21,7 +21,7 @@ type ApiInit = RequestInit & { timeoutMs?: number }
 function cookie(name: string) {
   const prefix = `${name}=`
   // split(';') 后再 trim：规范输出是 "; "，但代理/老浏览器可能只给 ";"，
-  // 只按 "; " 切会漏掉 CSRF，写操作全都报 403 拦回来
+  // 只按 "; " 切会漏掉 CSRF，写操作全部被 403 挡回来
   const value = document.cookie
     .split(';')
     .map((part) => part.trim())
@@ -38,7 +38,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     if (csrf) headers.set('X-CDT-CSRF', csrf)
   }
 
-  // 调用方自带 signal（比如组件卸载取消）时以它为准，内部不再叠加超时
+  // 调用方自己带 signal（比如组件卸载取消）时以它为准，内部不再叠加超时
   const controller = rest.signal ? null : new AbortController()
   const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : 0
 
@@ -52,7 +52,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     })
   } catch (error) {
     // fetch 只在网络层失败时 reject。原样抛出去，界面上就是一句英文
-    // 「Failed to fetch」，用户看不出是断网还是后端挂了，也不知道该等还是该重启。
+    // 「Failed to fetch」，用户既看不出是断网还是后端挂了，也不知道该等还是该重启。
     if (controller?.signal.aborted) {
       throw new APIError(
         0,
