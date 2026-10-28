@@ -67,6 +67,31 @@ def send_all(config: dict[str, str], message: Message) -> dict[str, str]:
     return results
 
 
+def result_text(results: dict[str, str], what: str = "报告") -> str:
+    """把 send_all 的返回值翻成一句写进事件进度的话。
+
+    事件详情里「通知」永远是最后一步，但只写「已发送」是不诚实的：
+    渠道失败、压根没配渠道都得说清楚，否则用户以为推送成功去等消息。
+    没启用任何渠道时返回空串 —— 什么都没发，不必在事件里占一行。
+    """
+    failed = [channel for channel, state in results.items() if state != "ok"]
+    if failed:
+        return f"{what}发送失败：{'、'.join(failed)}"
+    if not results:
+        return ""
+    return f"{what}已发送"
+
+
+def note_notify(event_id: int, results: dict[str, str], what: str = "报告") -> None:
+    """把发送结果写成事件的最后一条进度。没渠道 / 没有事件时不做任何事。"""
+    from . import repo # 延迟导入，避免模块级循环依赖
+
+    text = result_text(results, what)
+    if not text or not event_id:
+        return
+    repo.add_event_progress(int(event_id), text)
+
+
 def send(config: dict[str, str], channel: str, message: Message) -> None:
     if channel == "telegram":
         _send_telegram(config, message)
@@ -187,7 +212,10 @@ def _send_email(config: dict[str, str], message: Message) -> None:
     try:
         if password:
             server.login(username, password)
-        server.sendmail(username, [recipient], mime.as_string())
+        # 发信信封的 MAIL FROM 也走同一个兜底：有些 SMTP（只填主机 + 收件人、
+        # 用服务器匿名转发的场景）留空 SMTP 账号是合法的，而空 from 会被直接拒信。
+        # 上面 header 里的 From 早就用 `username or recipient` 兜过一次了，两处要一致。
+        server.sendmail(username or recipient, [recipient], mime.as_string())
     finally:
         try:
             server.quit()
@@ -198,6 +226,17 @@ def _send_email(config: dict[str, str], message: Message) -> None:
 # --------------------------------------------------------------------------
 # Webhook
 # --------------------------------------------------------------------------
+
+def _json_inner(value: str) -> str:
+    """把值转义成「能安全放进 JSON 字符串字面量」的形式（去掉首尾引号）。
+
+    以前是直接 str.replace 塞进用户模板：换班组名 / 服务器备注都是自由输入，
+    含一个双引号（如 `香港\"主力\"`）就会产出 `{\"content\":\"香港\"主力\"...\"}`
+    这种非法 JSON，对方回 400，通知静默失败。json.dumps 顺带把换行转成 \n，
+    正好也是嵌进 JSON 字符串该有的样子。
+    """
+    return json.dumps(str(value), ensure_ascii=False)[1:-1]
+
 
 def _send_webhook(config: dict[str, str], message: Message) -> None:
     url = config.get("notify_wh_url", "")
@@ -218,9 +257,9 @@ def _send_webhook(config: dict[str, str], message: Message) -> None:
         )
     else:
         body = (
-            body.replace("{title}", message.title)
-            .replace("{text}", message.text.replace("\n", "\\n"))
-            .replace("{kind}", message.kind)
+            body.replace("{title}", _json_inner(message.title))
+            .replace("{text}", _json_inner(message.text))
+            .replace("{kind}", _json_inner(message.kind))
         )
 
     if method == "GET":
