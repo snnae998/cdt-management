@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { Check, HeartPulse, Repeat, TriangleAlert } from 'lucide-react'
 import { del } from '../api'
 import { ownerLabel } from '../owners'
+import { maskInstanceId } from '../masking'
 import type { Server } from '../types'
 import { Modal } from './ui'
+import MaskedField from './MaskedField'
 
 type Props = {
   servers: Server[]
@@ -151,7 +153,7 @@ export default function ServerPicker({
               >
                 <span className="server-pick-main">
                   <span className="server-pick-name">{server.label}</span>
-                  <code className="server-pick-id">{server.instance_id || '未填实例 ID'}</code>
+                  <code className="server-pick-id"><MaskedField full={server.instance_id} masked={maskInstanceId(server.instance_id)} fallback="未填实例 ID" /></code>
                 </span>
                 <span className={`owner-tag${owner ? (owner.active ? ' locked' : ' paused') : ' free'}`}>
                   {owner?.kind === 'group' ? <Repeat size={10} /> : null}
