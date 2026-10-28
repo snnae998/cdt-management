@@ -745,7 +745,11 @@ export default function App() {
           <button className="btn ghost sm" onClick={reconcile}>
             <RefreshCw size={12} /> 立即同步
           </button>
-      {stale && (<Badge tone="amber" dot>连不上后端，数据可能已过期</Badge>)}
+      {stale && (
+            <Badge tone="amber" dot>
+              连不上后端，数据可能已过期
+            </Badge>
+          )}
           <span>
             同步间隔 {settings.reconcile_interval} 秒 · {overview.timezone}
           </span>
