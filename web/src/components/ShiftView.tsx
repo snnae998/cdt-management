@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { ArrowRight, Clock3, LoaderCircle, Pencil, Plus, Repeat, Trash2, Zap } from 'lucide-react'
 import type { ShiftGroup } from '../types'
+import { maskInstanceId, maskIp } from '../masking'
 import { Badge, Empty, Meter, phaseTone, statusLabel, statusTone } from './ui'
+import MaskedField from './MaskedField'
 
 type Props = {
   groups: ShiftGroup[]
@@ -198,11 +200,11 @@ export default function ShiftView({
                             <Badge tone={statusTone(server.instance_status)}>
                               {statusLabel(server.instance_status, server.stopped_mode)}
                             </Badge>
-                            <code>{server.instance_id || '未填实例'}</code>
+                            <code><MaskedField full={server.instance_id} masked={maskInstanceId(server.instance_id)} fallback="未填实例" /></code>
                           </div>
                         </div>
                         <div className="slot-side">
-                          <div className="slot-ip">{server.public_ip || '无公网 IP'}</div>
+                          <div className="slot-ip"><MaskedField full={server.public_ip} masked={maskIp(server.public_ip)} fallback="无公网 IP" /></div>
                           <Meter
                             used={server.traffic_used}
                             quota={server.quota_gb}
