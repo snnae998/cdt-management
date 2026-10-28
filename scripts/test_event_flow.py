@@ -70,7 +70,9 @@ def _event(event_id: int) -> dict:
 class EventFlow(unittest.TestCase):
     def setUp(self) -> None:
         db.init_db()
-        repo.set_settings({"notify_on_keepalive": "1"})
+        # DDNS 打开：这两个用例测的正是「DDNS / 解析排在已确认之后」，
+        # 关掉 DDNS 时那一步本来就不该出现（见 test_3）。
+        repo.set_settings({"notify_on_keepalive": "1", "ddns_enabled": "1"})
         # 桩掉所有出口：状态查询、DDNS、通知
         self._orig = (
             scheduler.aliyun.get_instance,
@@ -102,7 +104,7 @@ class EventFlow(unittest.TestCase):
         ) = self._orig
 
     def test_1_keepalive_notify_is_last(self):
-        """保活拉起：已确认 → DDNS → 已推送通知，通知在最后。"""
+        """保活拉起：已确认 → DDNS → 报告已发送，通知永远是最后一步。"""
         server_id = _make_server("测试机-保活", "i-test-event-01")
         event_id = repo.add_event(
             "start",
@@ -124,7 +126,7 @@ class EventFlow(unittest.TestCase):
                 "已下发启动指令（原状态 Stopped）",
                 "已确认 Running（运行中）",
                 "DDNS：✅ 已同步",
-                "已推送抢占恢复通知",
+                "报告已发送",
             ],
         )
         event = _event(event_id)
@@ -159,6 +161,39 @@ class EventFlow(unittest.TestCase):
                 "已确认 Running（运行中）",
                 "解析 demo.example.com 已同步",
             ],
+        )
+
+    def test_3_ddns_off_writes_no_dns_step(self):
+        """DDNS 关着：手动开机不许写「解析 … ⏸ DDNS 未启用」。
+
+        这条曾经会污染记录状态：sync_record 把「⏸ DDNS 未启用」当成这条域名的
+        同步结果落库，原本「✅ 已同步」的记录在 DNS 页变成「待同步」黄点。
+        """
+        repo.set_settings({"ddns_enabled": "0"})
+        server_id = _make_server("测试机-DDNS关", "i-test-event-03")
+        orig_record_of = scheduler.repo.dns_records_of
+        scheduler.repo.dns_records_of = lambda kind, target_id: ["off.example.com"]
+        try:
+            event_id = repo.add_event(
+                "start",
+                "测试机-DDNS关：手动开机",
+                "原状态 Stopped",
+                level="info",
+                server_id=server_id,
+                status="running",
+                pending_status="Running",
+            )
+            repo.add_event_progress(event_id, "已下发开机指令")
+
+            scheduler._confirm_pending_events()
+        finally:
+            scheduler.repo.dns_records_of = orig_record_of
+
+        texts = _texts(event_id)
+        self.assertEqual(texts, ["已下发开机指令", "已确认 Running（运行中）"])
+        self.assertFalse(
+            any("DDNS 未启用" in text for text in texts),
+            f"DDNS 关闭时不该出现同步步骤：{texts}",
         )
 
 
