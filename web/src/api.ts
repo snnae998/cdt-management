@@ -37,6 +37,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     const csrf = cookie('cdt_mgmt_csrf')
     if (csrf) headers.set('X-CDT-CSRF', csrf)
   }
+
   // 调用方自带 signal（比如组件卸载取消）时以它为准，内部不再叠加超时
   const controller = rest.signal ? null : new AbortController()
   const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : 0
@@ -63,6 +64,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   } finally {
     if (timer) window.clearTimeout(timer)
   }
+
   if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
